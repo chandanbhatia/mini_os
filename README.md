@@ -12,7 +12,7 @@ This OS provides the minimal kernel primitives needed to structure embedded firm
 
 **Key properties:**
 - Zero heap usage — all kernel and task state is statically allocated
-- No external dependencies beyond CMSIS device headers and the STM32 HAL
+- No external dependencies beyond CMSIS device headers and the NXP HAL
 - Context switch in ~8 ARM instructions (4-line naked assembly function)
 - ISR-safe queue send and semaphore signal
 - Configurable queue depth and message size per queue instance
