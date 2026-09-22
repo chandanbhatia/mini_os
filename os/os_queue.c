@@ -156,7 +156,7 @@ int os_queue_send(OS_Queue *q, const void *data, uint8_t len)
 /* =============================================================
  * os_queue_receive_timeout
  * Blocking receive with timeout.
- * Returns 0 on success, -1 on timeout.
+ * Returns 0 on success, -1 on timeout, -2 on Busy..
  * ============================================================= */
 int os_queue_receive_timeout(OS_Queue *q, void *data, uint8_t *len, uint32_t timeout_ms)
 {
@@ -171,6 +171,14 @@ int os_queue_receive_timeout(OS_Queue *q, void *data, uint8_t *len, uint32_t tim
     while (1)
     {
         uint32_t primask = os_enter_critical();
+
+        /* Register as receiver waiter */
+        if (q->waiting_rx_task != OS_QUEUE_NO_WAITER && q->waiting_rx_task != os_current_id())
+        {
+            /* Reject request immediately with an error code */
+            os_exit_critical(primask);
+            return -2; /* BUSY */
+        }
 
         if (q->count > 0)
         {
