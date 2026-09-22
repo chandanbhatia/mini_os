@@ -16,6 +16,7 @@ This OS provides the minimal kernel primitives needed to structure embedded firm
 - Context switch in ~8 ARM instructions (4-line naked assembly function)
 - ISR-safe queue send and semaphore signal
 - Configurable queue depth and message size per queue instance
+- Stack overflow detection at runtime 
 
 ---
 
@@ -50,7 +51,6 @@ timer_cb_50ms ──[queue_send_from_isr]──► queue_recv_task (extra source
 | No preemption | A task that never yields starves all others. Use `os_sleep_ms()` or any other blocking call at the top of every task loop. |
 | One blocked waiter per primitive | Each queue and semaphore supports one blocked task at a time. |
 | No task priorities | Round-robin scheduling only — all ready tasks share equal CPU time. |
-| No stack overflow detection at runtime | Sentinel value written at stack bottom at init but not checked continuously (easy to add in `os_tick()`). |
 | Finite timeout max ~24 days | Signed subtraction comparison works for timeouts < 2³¹ ms. Use `OS_WAIT_FOREVER` for indefinite waits. |
 | No preemptive stretch | PendSV-based preemption would require saving r0–r3, r12, xPSR (hardware does this via exception entry frame) plus a full 17-word initial stack frame per task. |
 
