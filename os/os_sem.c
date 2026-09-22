@@ -20,6 +20,8 @@ void os_sem_wait(OS_Sem *sem)
 
 /* =============================================================
  * os_sem_wait_timeout
+ * timeout_ms: OS_TIMEOUT_FOREVER to block indefinitely.
+ * Returns 0 on success (signal consumed), -1 on timeout, -2 on Busy.
  * ============================================================= */
 int os_sem_wait_timeout(OS_Sem *sem, uint32_t timeout_ms)
 {
@@ -40,6 +42,14 @@ int os_sem_wait_timeout(OS_Sem *sem, uint32_t timeout_ms)
             }
             os_exit_critical(primask);
             return 0;
+        }
+
+        /* Register as receiver waiter */
+        if (sem->rx_waiter != OS_SEM_NO_WAITER && sem->rx_waiter != os_current_id())
+        {
+            /* Reject request immediately with an error code */
+            os_exit_critical(primask);
+            return -2; /* BUSY */
         }
 
         /* Check deadline if non-infinite timeout */
