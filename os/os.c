@@ -4,17 +4,25 @@
 
 static OS_TCB os_tasks[OS_MAX_TASKS];
 
-static uint8_t os_n_tasks  = 0;
-static uint8_t os_cur      = 0;
-static uint32_t os_ms      = 0;
 static OSTickCb os_tick_cb = NULL;
 
+static uint32_t os_ms     = 0;
+static uint8_t os_n_tasks = 0;
+static uint8_t os_cur     = 0;
+
+/* Bootstrap flag: on first PendSV call we must NOT save
+ * the startup context into any real TCB.                */
+static volatile uint8_t bootstrapping = 0;
+
+static volatile bool if_os_started = false;
+
 /* Idle task stack owned here; no user allocation needed */
-static uint32_t os_idle_stack[OS_IDLE_STACK_SZ];
+static uint32_t os_idle_stack[OS_IDLE_STACK_SZ] __attribute__((aligned(8)));
 
 static void os_idle_func(void);
 
 void os_block_current_until(uint32_t until_ms);
+uint32_t os_pendsv_schedule(uint32_t cur_sp);
 
 /* =============================================================
  * os_task_trampoline
@@ -23,10 +31,6 @@ void os_block_current_until(uint32_t until_ms);
  * ============================================================= */
 static void os_task_trampoline(void)
 {
-    /* Explicitly enable IRQs. The context switch disabled them; a new task
-     * has no saved PRIMASK to restore so we enable unconditionally here.
-     * This is the only legitimate use of a hardcoded 0 in this codebase. */
-    __asm volatile("cpsie i" ::: "memory");
     os_tasks[os_cur].func();
 
     /* Task function returned should not happen in a well-written task */
@@ -40,50 +44,53 @@ static void os_task_trampoline(void)
 
 /* =============================================================
  * os_init_stack
- * Pre-loads a fake context frame so the first POP {r4-r11, PC}
- * in os_do_switch drops into os_task_trampoline.
  *
- * Also writes the stack sentinel at the lowest address (stack[0])
- * for overflow detection.
+ * Builds the 17-word initial frame so that the first
+ * POP {r4-r11, PC} in PendSV_Handler launches the task:
  *
- * Frame layout (SP points to sp[0], grows upward to sp[8]):
- *   sp[0..7] = r4..r11 (initialised to debug patterns)
- *   sp[8]    = PC      = &os_task_trampoline
+ *   POP reads EXC_RETURN (0xFFFFFFF9) into PC
+ *   exception return
+ *   CPU pops hardware exception frame
+ *   PC = os_task_trampoline
  *
- * If FPU is enabled, 16 additional words for s16-s31 are placed
- * below the integer frame (lower address = pushed last by VPUSH).
+ * Frame built high-to-low with *--sp so SP ends at [r4] slot.
+ *
+ * Regarding xPSR bit 9 (STKALIGN):
+ *   We 8-byte-align stack_top.  After 17 *--sp:
+ *     initial_SP  = stack_top - 68 (mod 8 = 4)
+ *     hw_frame_SP = initial_SP + 36 (mod 8 = 0) ? 8-byte aligned ?
+ *   So bit 9 = 0 is correct (no dummy padding word).
  * ============================================================= */
 static uint32_t os_init_stack(uint32_t *stack, uint32_t words)
 {
-    DEV_ASSERT(stack != NULL);
+    stack[0] = OS_STACK_SENTINEL; /* guard at lowest address */
 
-    stack[0] = OS_STACK_SENTINEL;
-
-    /* Align top of stack to 8 bytes */
-    volatile uint32_t top = (uint32_t)(stack + words);
-    top &= ~7U;
+    uint32_t top = (uint32_t)(stack + words) & ~7U; /* 8-byte align */
     uint32_t *sp = (uint32_t *)top;
 
-#if defined(__FPU_USED) && (__FPU_USED == 1)
-    /* Reserve 16 words for s16-s31 FPU frame */
-    sp -= 16;
-    for (int i = 0; i < 16; i++)
-    {
-        sp[i] = 0;
-    }
-#endif
+    /* Hardware exception frame (popped by CPU on exception return) */
+    *--sp = 0x01000000UL;                 /* xPSR : Thumb, no flags   */
+    *--sp = (uint32_t)os_task_trampoline; /* PC   : task entry        */
+    *--sp = 0xFFFFFFF9UL;                 /* LR   : EXC_RETURN sentinel */
+    *--sp = 0UL;                          /* r12                      */
+    *--sp = 0UL;                          /* r3                       */
+    *--sp = 0UL;                          /* r2                       */
+    *--sp = 0UL;                          /* r1                       */
+    *--sp = 0UL;                          /* r0                       */
 
-    /* Integer frame: r4-r11 + PC */
-    sp -= 9;
-    sp[0] = 0x00000004UL;                 /* r4  debug sentinel */
-    sp[1] = 0x00000005UL;                 /* r5  */
-    sp[2] = 0x00000006UL;                 /* r6  */
-    sp[3] = 0x00000007UL;                 /* r7  */
-    sp[4] = 0x00000008UL;                 /* r8  */
-    sp[5] = 0x00000009UL;                 /* r9  */
-    sp[6] = 0x0000000AUL;                 /* r10 */
-    sp[7] = 0x0000000BUL;                 /* r11 */
-    sp[8] = (uint32_t)os_task_trampoline; /* PC */
+    /* Software frame-must match PUSH {r4-r11, LR} layout exactly.
+     * PUSH stores lowest-numbered reg at lowest address:
+     *   [SP+0]  = r4   [SP+4]  = r5  ...  [SP+28] = r11  [SP+32] = LR
+     * Build high-to-low so final sp points to r4 slot.             */
+    *--sp = 0xFFFFFFF9UL; /* [SP+32]: EXC_RETURN ? POPped as PC   */
+    *--sp = 0UL;          /* [SP+28]: r11                         */
+    *--sp = 0UL;          /* [SP+24]: r10                         */
+    *--sp = 0UL;          /* [SP+20]: r9                          */
+    *--sp = 0UL;          /* [SP+16]: r8                          */
+    *--sp = 0UL;          /* [SP+12]: r7                          */
+    *--sp = 0UL;          /* [SP+8 ]: r6                          */
+    *--sp = 0UL;          /* [SP+4 ]: r5                          */
+    *--sp = 0UL;          /* [SP+0 ]: r4  ? initial SP            */
 
     return (uint32_t)sp;
 }
@@ -152,39 +159,64 @@ int os_task_create(osThreadFunc_t func,
     return (int)id;
 }
 
-/**
- * @brief Saves exactly the registers that a cooperative switch needs to save.
- * os_do_switch() is entered as a regular C function call via BL. The calling convention (AAPCS) 
- * guarantees that r0-r3 and r12 are either saved by the compiler before the call or are no longer live.
- * LR holds the return address back into the caller, so saving it and later popping it as PC resumes the task exactly where it yielded
- * 'To do': If FPU is enabled (__FPU_USED == 1), VPUSH {s16-s31} / VPOP {s16-s31} 
- */
-__attribute__((naked)) static void os_do_switch(uint32_t *save_sp, uint32_t load_sp)
+/* =============================================================
+ * PendSV_Handler - naked context switch
+ *
+ * r0 = cur_sp (argument to os_pendsv_schedule)
+ * r0 = next_sp (return value from os_pendsv_schedule)
+ *
+ * Safe from SysTick preemption because both exceptions are
+ * configured to the same priority (see os_start).
+ * ============================================================= */
+__attribute__((naked)) void PendSV_Handler(void)
 {
     __asm volatile(
-        "PUSH {r4-r11, LR}    \n"
-        "STR  SP, [r0]        \n"
-        "MOV  SP,  r1         \n"
-        "POP  {r4-r11, PC}    \n" ::: "memory");
+        /* 1. Save current task's software frame + EXC_RETURN */
+        "PUSH {r4-r11, LR}          \n"
+
+        /* 2. Pass current SP to C scheduler, get next SP back */
+        "MOV  r0, SP                \n" /* r0 = cur_sp (argument) */
+        "BL   os_pendsv_schedule    \n" /* r0 = next_sp (return)  */
+
+        /* 3. Load next task's SP and restore its software frame */
+        "MOV  SP, r0                \n" /* SP = next_sp           */
+        "POP  {r4-r11, PC}          \n" /* PC = EXC_RETURN        */
+                                        /* ? exception return     */
+                                        /* ? CPU pops hw frame    */
+        ::: "memory");
 }
 
-/**
- * @brief Voluntarily yields CPU execution to allow other ready tasks to run.
- */
-void os_yield(void)
+/* =============================================================
+ * os_pendsv_schedule - C scheduler called from PendSV_Handler
+ *
+ * cur_sp : SP value after PUSH {r4-r11, LR} in the handler,
+ *          i.e. the bottom of the current task's software frame.
+ *
+ * Returns: SP of the next task to run.
+ * ============================================================= */
+uint32_t os_pendsv_schedule(uint32_t cur_sp)
 {
-    uint32_t primask = os_enter_critical();
-
-    uint8_t cur = os_cur;
-
-    if (os_tasks[cur].state == OS_TASK_RUNNING)
+    /* Bootstrap: first invocation has no real current task to save */
+    if (bootstrapping)
     {
-        os_tasks[cur].state = OS_TASK_READY;
+        bootstrapping = 0;
+        /* os_cur and os_tasks[os_cur].state already set by os_start() */
+        return os_tasks[os_cur].sp;
     }
 
-    /* Round-robin search for next READY task */
+    /* Normal operation: save current task's SP */
+    os_tasks[os_cur].sp = cur_sp;
+
+    if (os_tasks[os_cur].state == OS_TASK_RUNNING)
+    {
+        os_tasks[os_cur].state = OS_TASK_READY;
+    }
+
+    /* Round-robin: find next READY task */
+    uint8_t cur     = os_cur;
     uint8_t next    = (uint8_t)((cur + 1) % os_n_tasks);
     uint8_t checked = 0;
+
     while (checked < os_n_tasks)
     {
         if (os_tasks[next].state == OS_TASK_READY)
@@ -194,30 +226,26 @@ void os_yield(void)
         next = (uint8_t)((next + 1) % os_n_tasks);
         checked++;
     }
-
-    /* No ready task found ? fall back to idle (always slot 0),always READY its loop calls os_yield() endlessly) */
+    /* All tasks sleeping/blocked ? run idle (always READY at slot 0) */
     if (checked == os_n_tasks)
     {
         next = 0;
     }
 
-    if (next == cur)
-    {
-        os_tasks[cur].state = OS_TASK_RUNNING;
-        os_exit_critical(primask);
-        return;
-    }
-
     os_cur               = next;
     os_tasks[next].state = OS_TASK_RUNNING;
 
-    /* IRQs remain disabled across the switch.
-     * Re-enabled by the trampoline (first run) or here (resumed run). */
-    os_do_switch((uint32_t *)&os_tasks[cur].sp,
-                 os_tasks[next].sp);
+    return os_tasks[next].sp;
+}
 
-    /* -- Resumed here when this task is rescheduled -- */
-    os_exit_critical(primask);
+/**
+ * @brief Voluntarily yields CPU execution to allow other ready tasks to run.
+ */
+void os_yield(void)
+{
+    SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
+    __DSB();
+    __ISB();
 }
 
 /**
@@ -241,6 +269,11 @@ __attribute__((weak)) void os_stack_overflow_hook(uint8_t task_id)
  */
 void os_tick(void)
 {
+    if (!if_os_started)
+    {
+        return;
+    }
+
     os_ms++;
 
     for (uint8_t i = 0; i < os_n_tasks; i++)
@@ -267,21 +300,28 @@ void os_tick(void)
 }
 
 /**
- * @brief Starts the cooperative scheduler and yields control to the highest-priority/first task.
+ * @brief Starts the cooperative scheduler and triggers PendSV to launch the first user task.
  *        Does not return under normal operating conditions.
  */
 void os_start(void)
 {
-    /* Prefer slot 1 (first user task) if it exists */
+    uint32_t lowest = (1UL << __NVIC_PRIO_BITS) - 1UL;
+    NVIC_SetPriority(PendSV_IRQn, lowest);  /* context switch      */
+    NVIC_SetPriority(SysTick_IRQn, lowest); /* SAME-critical!    */
+
+    __disable_irq();
     os_cur                 = (os_n_tasks > 1) ? 1U : 0U;
     os_tasks[os_cur].state = OS_TASK_RUNNING;
 
-    static uint32_t _startup_sp; /* throwaway main() never resumes */
-    os_do_switch(&_startup_sp, os_tasks[os_cur].sp);
+    bootstrapping = 1;
+    SCB->ICSR     = SCB_ICSR_PENDSVSET_Msk;
 
-    /* never reached */
+    if_os_started = true;
+    __DSB();
+
+    __enable_irq(); /* PendSV fires, first task starts */
     while (1)
-        ;
+        ; /* never reached */
 }
 
 /**
