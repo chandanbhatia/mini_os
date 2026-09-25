@@ -8,15 +8,16 @@ A small, self-contained cooperative OS kernel written in C for ARM Cortex-M micr
 
 This OS provides the minimal kernel primitives needed to structure embedded firmware into independent, cooperating tasks without the weight and complexity of a full RTOS like FreeRTOS.
 
-**Scheduling model:** cooperative round-robin. A task owns the CPU until it voluntarily releases it by calling `os_sleep_ms()`, `os_yield()`, or blocking on a queue or semaphore. No task can be preempted externally.
+**Scheduling model:** preemptive round-robin via PendSV. SysTick fires every 1 ms and pends PendSV, which performs the context switch. Tasks can also yield voluntarily via `os_sleep_ms()`, `os_yield()`, or by blocking on a queue or semaphore. A task that never calls any of these will still be preempted at the next SysTick tick.
 
 **Key properties:**
 - Zero heap usage — all kernel and task state is statically allocated
 - No external dependencies beyond CMSIS device headers and the NXP HAL
-- Context switch in ~8 ARM instructions (4-line naked assembly function)
+- Preemptive context switch: 4-line naked PendSV handler + C scheduler function
+- FPU context handled automatically via EXC_RETURN saved in software frame — no VPUSH/VPOP needed
 - ISR-safe queue send and semaphore signal
 - Configurable queue depth and message size per queue instance
-- Stack overflow detection at runtime 
+- Stack overflow detection at runtime (sentinel at stack bottom, checked every tick)
 
 ---
 
@@ -52,7 +53,7 @@ timer_cb_50ms ──[queue_send_from_isr]──► queue_recv_task (extra source
 | One blocked waiter per primitive | Each queue and semaphore supports one blocked task at a time. |
 | No task priorities | Round-robin scheduling only — all ready tasks share equal CPU time. |
 | Finite timeout max ~24 days | Signed subtraction comparison works for timeouts < 2³¹ ms. Use `OS_WAIT_FOREVER` for indefinite waits. |
-| No preemptive stretch | PendSV-based preemption would require saving r0–r3, r12, xPSR (hardware does this via exception entry frame) plus a full 17-word initial stack frame per task. |
+| MSP-only mode | Tasks and handlers both use MSP. A production design separates them: tasks on PSP, handlers on MSP. This enables MPU-based per-task stack protection(To Do). |
 
 ---
 
