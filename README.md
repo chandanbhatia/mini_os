@@ -1,4 +1,4 @@
-# Mini Cooperative OS
+# Mini OS for ARM Cortex-M
 
 A small, self-contained cooperative OS kernel written in C for ARM Cortex-M microcontrollers. Built as a learning and demonstration project — readable source, no external dependencies, no heap.
 
@@ -49,11 +49,12 @@ timer_cb_50ms ──[queue_send_from_isr]──► queue_recv_task (extra source
 
 | Limitation | Notes |
 |---|---|
-| No preemption | A task that never yields starves all others. Use `os_sleep_ms()` or any other blocking call at the top of every task loop. |
 | One blocked waiter per primitive | Each queue and semaphore supports one blocked task at a time. |
-| No task priorities | Round-robin scheduling only — all ready tasks share equal CPU time. |
+| No task priorities | Round-robin scheduling only. All READY tasks share equal CPU time. |
 | Finite timeout max ~24 days | Signed subtraction comparison works for timeouts < 2³¹ ms. Use `OS_WAIT_FOREVER` for indefinite waits. |
-| MSP-only mode | Tasks and handlers both use MSP. A production design separates them: tasks on PSP, handlers on MSP. This enables MPU-based per-task stack protection(To Do). |
+| MSP-only mode | Tasks and handlers both use MSP. A production design separates them: tasks on PSP, handlers on MSP. This enables MPU-based per-task stack protection. |
+| Mutex not implemented | Binary semaphore used for mutual exclusion has no priority inheritance — priority inversion is possible. A proper mutex would elevate the holder's priority to match the highest waiter. |
+
 
 ---
 
