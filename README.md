@@ -1,4 +1,4 @@
-# Mini OS for ARM Cortex-M
+# Mini Preemptive RTOS for ARM Cortex-M
 
 A small, self-contained cooperative OS kernel written in C for ARM Cortex-M microcontrollers. Built as a learning and demonstration project — readable source, no external dependencies, no heap.
 
@@ -6,14 +6,14 @@ A small, self-contained cooperative OS kernel written in C for ARM Cortex-M micr
 
 ## Overview
 
-This OS provides the minimal kernel primitives needed to structure embedded firmware into independent, cooperating tasks without the weight and complexity of a full RTOS like FreeRTOS.
+This OS provides independent tasks scheduled by a priority bitmap — the highest-priority ready task always runs, with round-robin among equal-priority tasks. Context switches happen via PendSV, triggered every SysTick tick and immediately on high-priority task wakeup.
 
-**Scheduling model:** preemptive round-robin via PendSV. SysTick fires every 1 ms and pends PendSV, which performs the context switch. Tasks can also yield voluntarily via `os_sleep_ms()`, `os_yield()`, or by blocking on a queue or semaphore. A task that never calls any of these will still be preempted at the next SysTick tick.
+**Scheduling model:** preemptive priority-based + round-robin at equal levels. SysTick fires every 1 ms and pends PendSV. Tasks can also yield voluntarily via `os_sleep_ms()`, `os_yield()`, or blocking on a queue or semaphore. A task that never yields is still preempted at the next tick.
 
 **Key properties:**
 - Zero heap usage — all kernel and task state is statically allocated
 - No external dependencies beyond CMSIS device headers and the NXP HAL
-- Preemptive context switch: 4-line naked PendSV handler + C scheduler function
+- O(1) priority scheduling via 32-bit bitmap + single CLZ instruction
 - FPU context handled automatically via EXC_RETURN saved in software frame — no VPUSH/VPOP needed
 - ISR-safe queue send and semaphore signal
 - Configurable queue depth and message size per queue instance
@@ -50,11 +50,10 @@ timer_cb_50ms ──[queue_send_from_isr]──► queue_recv_task (extra source
 | Limitation | Notes |
 |---|---|
 | One blocked waiter per primitive | Each queue and semaphore supports one blocked task at a time. |
-| No task priorities | Round-robin scheduling only. All READY tasks share equal CPU time. |
 | Finite timeout max ~24 days | Signed subtraction comparison works for timeouts < 2³¹ ms. Use `OS_WAIT_FOREVER` for indefinite waits. |
 | MSP-only mode | Tasks and handlers both use MSP. A production design separates them: tasks on PSP, handlers on MSP. This enables MPU-based per-task stack protection. |
 | Mutex not implemented | Binary semaphore used for mutual exclusion has no priority inheritance — priority inversion is possible. A proper mutex would elevate the holder's priority to match the highest waiter. |
-
+| No task deletion | Once created, tasks run until terminated. A `os_task_delete()` implementation would need to reclaim the TCB slot and stack. |
 
 ---
 
