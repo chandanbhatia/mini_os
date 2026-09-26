@@ -95,13 +95,13 @@ void demo_init(void)
     os_kernel_init();
 
     os_queue_init(&queue, queue_buffer, MESSAGE_SIZE, QUEUE_DEPTH);
-    os_sem_init(&sem, 0);
+    os_sem_init(&sem, 0U);
 
-    os_task_create(led_1_task, "led_1", led_1_stack, LED_1_STACK_SZ);
-    os_task_create(LED_2_task, "LED_2", led_2_stack, LED_2_STACK_SZ);
+    os_task_create(led_1_task, "led_1", led_1_stack, LED_1_STACK_SZ, 2U);
+    os_task_create(LED_2_task, "LED_2", led_2_stack, LED_2_STACK_SZ, 2U);
 
-    os_task_create(queue_pub_task, "queue_pub", queue_pub_stack, QUEUE_PUB_STACK_SZ);
-    os_task_create(queue_recv_task, "queue_recv", queue_recv_stack, QUEUE_RECV_STACK_SZ);
+    os_task_create(queue_pub_task, "queue_pub", queue_pub_stack, QUEUE_PUB_STACK_SZ, 4U);
+    os_task_create(queue_recv_task, "queue_recv", queue_recv_stack, QUEUE_RECV_STACK_SZ, 5U);
 
     os_start(); 
     

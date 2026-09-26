@@ -2,13 +2,26 @@
 
 #define OS_IDLE_STACK_SZ 128 /* words */
 
+#define TASK_READY_ARRAY_SIZE (OS_PRIORITY_MAX + 1U)
+
+typedef struct
+{
+    OS_TCB *head;
+    OS_TCB *tail;
+} os_ready_list_t;
+
 static OS_TCB os_tasks[OS_MAX_TASKS];
+
+static os_ready_list_t g_ready_lists[TASK_READY_ARRAY_SIZE] = {NULL};
 
 static OSTickCb os_tick_cb = NULL;
 
-static uint32_t os_ms     = 0;
-static uint8_t os_n_tasks = 0;
-static uint8_t os_cur     = 0;
+static OS_TCB *g_current_tcb   = NULL;
+static uint32_t g_ready_bitmap = 0;
+
+static uint32_t g_os_ms     = 0;
+static uint8_t g_os_n_tasks = 0;
+static uint8_t g_os_cur     = 0;
 
 /* Bootstrap flag: on first PendSV call we must NOT save
  * the startup context into any real TCB.                */
@@ -20,21 +33,22 @@ static volatile bool if_os_started = false;
 static uint32_t os_idle_stack[OS_IDLE_STACK_SZ] __attribute__((aligned(8)));
 
 static void os_idle_func(void);
+static void os_remove_task_ready(OS_TCB *tcb);
 
 void os_block_current_until(uint32_t until_ms);
 uint32_t os_pendsv_schedule(uint32_t cur_sp);
 
-/* =============================================================
+/**
  * os_task_trampoline
  * First PC of every new task.  Re-enables IRQs (disabled during
  * context switch) then enters the user function.
- * ============================================================= */
+ */
 static void os_task_trampoline(void)
 {
-    os_tasks[os_cur].func();
+    os_tasks[g_os_cur].func();
 
     /* Task function returned should not happen in a well-written task */
-    os_tasks[os_cur].state = OS_TASK_TERMINATED;
+    os_tasks[g_os_cur].state = OS_TASK_TERMINATED;
 
     while (1)
     {
@@ -42,8 +56,8 @@ static void os_task_trampoline(void)
     }
 }
 
-/* =============================================================
- * os_init_stack
+/**
+ * @brief os_init_stack
  *
  * Builds the 17-word initial frame so that the first
  * POP {r4-r11, PC} in PendSV_Handler launches the task:
@@ -60,7 +74,7 @@ static void os_task_trampoline(void)
  *     initial_SP  = stack_top - 68 (mod 8 = 4)
  *     hw_frame_SP = initial_SP + 36 (mod 8 = 0) ? 8-byte aligned ?
  *   So bit 9 = 0 is correct (no dummy padding word).
- * ============================================================= */
+ */
 static uint32_t os_init_stack(uint32_t *stack, uint32_t words)
 {
     stack[0] = OS_STACK_SENTINEL; /* guard at lowest address */
@@ -96,16 +110,119 @@ static uint32_t os_init_stack(uint32_t *stack, uint32_t words)
 }
 
 /**
+ * @brief Scheduler Ready Queue Management (O(1) Bitmap + __CLZ)
+ */
+static void os_add_task_ready(OS_TCB *tcb)
+{
+    if (tcb == NULL)
+    {
+        return;
+    }
+
+    uint32_t primask = os_enter_critical();
+
+    tcb->state   = OS_TASK_READY;
+    uint8_t prio = tcb->priority;
+
+    /* Append to the end of the priority linked list */
+    if (g_ready_lists[prio].head == NULL)
+    {
+        g_ready_lists[prio].head = tcb;
+        g_ready_lists[prio].tail = tcb;
+        tcb->next                = NULL;
+    }
+    else
+    {
+        g_ready_lists[prio].tail->next = tcb;
+        g_ready_lists[prio].tail       = tcb;
+        tcb->next                      = NULL;
+    }
+
+    /* Set active bit in ready bitmap */
+    g_ready_bitmap |= (1U << prio);
+
+    /* Trigger PendSV immediately if new task outranks currently running task */
+    if (g_current_tcb != NULL && prio > g_current_tcb->priority)
+    {
+        SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
+    }
+
+    os_exit_critical(primask);
+}
+
+/**
+ * @brief Scheduler Remove Queue Management
+ */
+static void os_remove_task_ready(OS_TCB *tcb)
+{
+    if (tcb == NULL)
+    {
+        return;
+    }
+
+    uint32_t primask = os_enter_critical();
+    uint8_t prio     = tcb->priority;
+
+    /* Assert if ready list empty for priority Index, Major issue in scheduler or stack corruption */
+    dev_assert(g_ready_lists[prio].head != NULL);
+    dev_assert(g_ready_lists[prio].tail != NULL);
+
+    OS_TCB *curr = g_ready_lists[prio].head;
+    OS_TCB *prev = NULL;
+
+    while (curr != tcb)
+    {
+        dev_assert(curr != NULL);
+        prev = curr;
+        curr = curr->next;
+    }
+
+    /* Update Head or Middle Link */
+    if (prev == NULL)
+    {
+        g_ready_lists[prio].head = curr->next;
+    }
+    else
+    {
+        prev->next = curr->next;
+    }
+
+    /* Update Tail Pointer if tail node was removed */
+    if (g_ready_lists[prio].tail == curr)
+    {
+        g_ready_lists[prio].tail = prev;
+    }
+
+    /* Disconnect removed node */
+    tcb->next = NULL;
+
+    /* Clear bitmap if this priority list is now empty */
+    if (g_ready_lists[prio].head == NULL)
+    {
+        g_ready_bitmap &= ~(1U << prio);
+    }
+
+    os_exit_critical(primask);
+}
+
+/**
  * @brief Initializes the core RTOS kernel structures and task control blocks.
  *        Must be called before creating tasks or starting the scheduler.
  */
 void os_kernel_init(void)
 {
     memset((void *)os_tasks, 0, sizeof(os_tasks));
-    os_n_tasks = 0;
-    os_cur     = 0;
-    os_ms      = 0;
-    os_tick_cb = NULL;
+    g_os_n_tasks = 0;
+    g_os_cur     = 0;
+    g_os_ms      = 0;
+    os_tick_cb   = NULL;
+
+    g_ready_bitmap = 0;
+    for (uint32_t i = 0; i < TASK_READY_ARRAY_SIZE; i++)
+    {
+        g_ready_lists[i].head = NULL;
+        g_ready_lists[i].tail = NULL;
+    }
 
     /* Create idle task at slot 0 right here so
      * os_task_create() fills slots 1..N and os_start()
@@ -118,7 +235,11 @@ void os_kernel_init(void)
     idle->state      = OS_TASK_READY;
     idle->id         = 0;
     idle->sp         = os_init_stack(os_idle_stack, OS_IDLE_STACK_SZ);
-    os_n_tasks       = 1;
+    idle->priority   = OS_PRIORITY_IDLE;
+    idle->next       = NULL;
+    g_os_n_tasks     = 1;
+
+    os_add_task_ready(idle);
 }
 
 /**
@@ -133,41 +254,46 @@ void os_kernel_init(void)
 int os_task_create(osThreadFunc_t func,
                    const char *name,
                    uint32_t *stack,
-                   uint32_t stack_words)
+                   uint32_t stack_words,
+                   uint8_t priority)
 {
-    if (os_n_tasks >= OS_MAX_TASKS || !func || !stack || stack_words < 64)
+    if (g_os_n_tasks >= OS_MAX_TASKS || !func || !stack || stack_words < 64)
     {
         return -1;
     }
 
-    uint8_t id = os_n_tasks++;
-    OS_TCB *t  = &os_tasks[id];
+    uint8_t id  = g_os_n_tasks++;
+    OS_TCB *tcb = &os_tasks[id];
 
     for (uint32_t i = 0; i < stack_words; i++)
     {
         stack[i] = OS_STACK_SENTINEL;
     }
 
-    t->func       = func;
-    t->name       = name ? name : "task";
-    t->stack_mem  = stack;
-    t->stack_size = stack_words;
-    t->state      = OS_TASK_READY;
-    t->id         = id;
-    t->sp         = os_init_stack(stack, stack_words);
+    tcb->func       = func;
+    tcb->name       = name ? name : "tcbask";
+    tcb->stack_mem  = stack;
+    tcb->stack_size = stack_words;
+    tcb->state      = OS_TASK_READY;
+    tcb->id         = id;
+    tcb->sp         = os_init_stack(stack, stack_words);
+    tcb->priority   = priority > OS_PRIORITY_MAX ? OS_PRIORITY_MAX : priority;
+    tcb->next       = NULL;
+
+    os_add_task_ready(tcb);
 
     return (int)id;
 }
 
-/* =============================================================
- * PendSV_Handler - naked context switch
+/**
+ * @brief PendSV_Handler - naked context switch
  *
  * r0 = cur_sp (argument to os_pendsv_schedule)
  * r0 = next_sp (return value from os_pendsv_schedule)
  *
  * Safe from SysTick preemption because both exceptions are
  * configured to the same priority (see os_start).
- * ============================================================= */
+ */
 __attribute__((naked)) void PendSV_Handler(void)
 {
     __asm volatile(
@@ -186,56 +312,53 @@ __attribute__((naked)) void PendSV_Handler(void)
         ::: "memory");
 }
 
-/* =============================================================
- * os_pendsv_schedule - C scheduler called from PendSV_Handler
+/**
+ * @brief os_pendsv_schedule - C scheduler called from PendSV_Handler
  *
  * cur_sp : SP value after PUSH {r4-r11, LR} in the handler,
  *          i.e. the bottom of the current task's software frame.
  *
  * Returns: SP of the next task to run.
- * ============================================================= */
+ */
 uint32_t os_pendsv_schedule(uint32_t cur_sp)
 {
     /* Bootstrap: first invocation has no real current task to save */
     if (bootstrapping)
     {
         bootstrapping = 0;
-        /* os_cur and os_tasks[os_cur].state already set by os_start() */
-        return os_tasks[os_cur].sp;
+        /* g_os_cur and os_tasks[g_os_cur].state already set by os_start() */
+        return os_tasks[g_os_cur].sp;
     }
 
     /* Normal operation: save current task's SP */
-    os_tasks[os_cur].sp = cur_sp;
+    os_tasks[g_os_cur].sp = cur_sp;
 
-    if (os_tasks[os_cur].state == OS_TASK_RUNNING)
+    if (os_tasks[g_os_cur].state == OS_TASK_RUNNING)
     {
-        os_tasks[os_cur].state = OS_TASK_READY;
+        os_tasks[g_os_cur].state = OS_TASK_READY;
     }
 
-    /* Round-robin: find next READY task */
-    uint8_t cur     = os_cur;
-    uint8_t next    = (uint8_t)((cur + 1) % os_n_tasks);
-    uint8_t checked = 0;
+    /* Rotate head to tail for equal-priority round-robin (O(1)) */
+    uint32_t primask = os_enter_critical();
+    uint32_t prio    = 31U - (uint32_t)__CLZ(g_ready_bitmap);
 
-    while (checked < os_n_tasks)
+    OS_TCB *head = g_ready_lists[prio].head;
+    g_os_cur     = head->id;
+
+    /* Only rotate if at least 2 tasks exist at this priority level */
+    if (head != NULL && head->next != NULL)
     {
-        if (os_tasks[next].state == OS_TASK_READY)
-        {
-            break;
-        }
-        next = (uint8_t)((next + 1) % os_n_tasks);
-        checked++;
-    }
-    /* All tasks sleeping/blocked ? run idle (always READY at slot 0) */
-    if (checked == os_n_tasks)
-    {
-        next = 0;
+        g_ready_lists[prio].head       = head->next; /* New head */
+        head->next                     = NULL;       /* Old head becomes tail */
+        g_ready_lists[prio].tail->next = head;
+        g_ready_lists[prio].tail       = head;
     }
 
-    os_cur               = next;
-    os_tasks[next].state = OS_TASK_RUNNING;
+    os_tasks[g_os_cur].state = OS_TASK_RUNNING;
 
-    return os_tasks[next].sp;
+    os_exit_critical(primask);
+
+    return os_tasks[g_os_cur].sp;
 }
 
 /**
@@ -274,15 +397,16 @@ void os_tick(void)
         return;
     }
 
-    os_ms++;
+    g_os_ms++;
 
-    for (uint8_t i = 0; i < os_n_tasks; i++)
+    for (uint8_t i = 0; i < g_os_n_tasks; i++)
     {
         /* Wake sleeping tasks whose deadline has arrived */
         if (os_tasks[i].state == OS_TASK_SLEEPING &&
-            (int32_t)(os_ms - os_tasks[i].sleep_until_ms) >= 0)
+            (int32_t)(g_os_ms - os_tasks[i].sleep_until_ms) >= 0)
         {
             os_tasks[i].state = OS_TASK_READY;
+            os_add_task_ready(&os_tasks[i]);
         }
 
         /* Stack overflow detection */
@@ -295,8 +419,12 @@ void os_tick(void)
 
     if (os_tick_cb)
     {
-        os_tick_cb(os_ms);
+        os_tick_cb(g_os_ms);
     }
+
+    SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
+    __DSB();
+    __ISB();
 }
 
 /**
@@ -310,8 +438,9 @@ void os_start(void)
     NVIC_SetPriority(SysTick_IRQn, lowest); /* SAME-critical!    */
 
     __disable_irq();
-    os_cur                 = (os_n_tasks > 1) ? 1U : 0U;
-    os_tasks[os_cur].state = OS_TASK_RUNNING;
+
+    g_os_cur                 = (g_os_n_tasks > 1) ? 1U : 0U;
+    os_tasks[g_os_cur].state = OS_TASK_RUNNING;
 
     bootstrapping = 1;
     SCB->ICSR     = SCB_ICSR_PENDSVSET_Msk;
@@ -343,9 +472,9 @@ static void os_idle_func(void)
  */
 void os_sleep_ms(uint32_t ms)
 {
-    uint32_t primask                = os_enter_critical();
-    os_tasks[os_cur].sleep_until_ms = os_ms + ms;
-    os_tasks[os_cur].state          = OS_TASK_SLEEPING;
+    uint32_t primask                  = os_enter_critical();
+    os_tasks[g_os_cur].sleep_until_ms = g_os_ms + ms;
+    os_tasks[g_os_cur].state          = OS_TASK_SLEEPING;
     os_exit_critical(primask);
     os_yield();
 }
@@ -357,8 +486,9 @@ void os_sleep_ms(uint32_t ms)
  */
 void os_block_current_until(uint32_t until_ms)
 {
-    os_tasks[os_cur].sleep_until_ms = until_ms;
-    os_tasks[os_cur].state          = OS_TASK_SLEEPING;
+    os_tasks[g_os_cur].sleep_until_ms = until_ms;
+    os_tasks[g_os_cur].state          = OS_TASK_SLEEPING;
+    os_remove_task_ready(&os_tasks[g_os_cur]);
 }
 
 /**
@@ -368,11 +498,12 @@ void os_block_current_until(uint32_t until_ms)
  */
 void os_unblock_task(uint8_t id)
 {
-    if (id < os_n_tasks &&
+    if (id < g_os_n_tasks &&
         (os_tasks[id].state == OS_TASK_BLOCKED ||
          os_tasks[id].state == OS_TASK_SLEEPING))
     {
         os_tasks[id].state = OS_TASK_READY;
+        os_add_task_ready(&os_tasks[id]);
     }
 }
 
@@ -383,7 +514,7 @@ void os_unblock_task(uint8_t id)
  */
 uint8_t os_current_id(void)
 {
-    return os_cur;
+    return g_os_cur;
 }
 
 /**
@@ -393,7 +524,7 @@ uint8_t os_current_id(void)
  */
 uint32_t os_now_ms(void)
 {
-    return os_ms;
+    return g_os_ms;
 }
 
 /**
@@ -401,5 +532,6 @@ uint32_t os_now_ms(void)
  */
 void os_block_current(void)
 {
-    os_tasks[os_cur].state = OS_TASK_BLOCKED;
+    os_tasks[g_os_cur].state = OS_TASK_BLOCKED;
+    os_remove_task_ready(&os_tasks[g_os_cur]);
 }
