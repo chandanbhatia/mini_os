@@ -20,7 +20,20 @@ typedef enum
     OS_TASK_TERMINATED = 4,
 } OSThreadState;
 
-typedef struct
+/**
+ * Priority range: 0 (lowest, idle) - 31 (highest).
+ * Backed by a 32-bit bitmap - finding the highest-priority READY
+ * task costs one CLZ instruction (O(1)).
+ */
+#define OS_PRIORITY_IDLE   0U
+#define OS_PRIORITY_LOW    8U
+#define OS_PRIORITY_NORMAL 16U
+#define OS_PRIORITY_HIGH   24U
+#define OS_PRIORITY_MAX    31U
+
+typedef struct os_tcb OS_TCB;
+
+struct os_tcb
 {
     const char *name;
     uint32_t sp;         /* saved stack pointer value    */
@@ -30,7 +43,9 @@ typedef struct
     uint32_t sleep_until_ms;
     osThreadFunc_t func;
     uint8_t id;
-} OS_TCB;
+    uint8_t priority; /* Task Priority (0..31) */
+    OS_TCB *next;     /* Linked list pointer for queue management */
+};
 
 typedef void (*OSTickCb)(uint32_t tick_ms);
 
@@ -53,9 +68,10 @@ void os_kernel_init(void);
  * @param name        Human-readable task name string (for debugging).
  * @param stack       Pointer to the user-allocated stack memory buffer.
  * @param stack_words Size of the stack memory buffer in 32-bit words.
+ * @param priority    Task Priority range: 0 (lowest, idle) - 31 (highest).
  * @return int        Assigned Task ID (>= 0) on success, or negative value on error.
  */
-int os_task_create(osThreadFunc_t func, const char *name, uint32_t *stack, uint32_t stack_words);
+int os_task_create(osThreadFunc_t func, const char *name, uint32_t *stack, uint32_t stack_words, uint8_t priority);
 
 /**
  * @brief Starts the cooperative scheduler and yields control to the highest-priority/first task.
