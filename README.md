@@ -1,6 +1,6 @@
 # Mini Preemptive RTOS for ARM Cortex-M
 
-A small, self-contained cooperative OS kernel written in C for ARM Cortex-M microcontrollers. Built as a learning and demonstration project — readable source, no external dependencies, no heap.
+A lightweight cooperative/preemptive RTOS kernel for ARM Cortex-M microcontrollers featuring software timers, binary semaphores, and inter-task message queues with no external dependencies, no heap.
 
 ---
 
@@ -68,6 +68,8 @@ os/
 ├── os_queue.c       — Queue implementation
 ├── os_sem.h         — Semaphore API
 └── os_sem.c         — Semaphore implementation
+└── os_timer.h       — Software Timer API
+└── os_timer.c       — Software Timer implementation
 
 demo/
 └── demo_app.c       — Four-task demo (LED blink, queue, semaphore)

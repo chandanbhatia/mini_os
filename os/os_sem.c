@@ -1,8 +1,11 @@
 #include "os_sem.h"
 
-/* =============================================================
- * os_sem_init
- * ============================================================= */
+/**
+ * @brief Initializes a binary semaphore control block.
+ *
+ * @param[out] sem      Pointer to the semaphore instance.
+ * @param[in]  initial  Initial count state: 0 for unavailable (blocked), 1 for available (ready).
+ */
 void os_sem_init(OS_Sem *sem, uint8_t initial)
 {
     sem->count     = (initial > 0) ? 1U : 0U;
@@ -10,19 +13,28 @@ void os_sem_init(OS_Sem *sem, uint8_t initial)
     sem->tx_waiter = OS_SEM_NO_WAITER;
 }
 
-/* =============================================================
- * os_sem_wait - block forever until signalled
- * ============================================================= */
+/**
+ * @brief Acquires (waits on) a semaphore, blocking indefinitely until signaled.
+ *
+ * Must be called from task context only.
+ *
+ * @param[in,out] sem  Pointer to the semaphore instance.
+ */
 void os_sem_wait(OS_Sem *sem)
 {
     (void)os_sem_wait_timeout(sem, OS_WAIT_FOREVER);
 }
 
-/* =============================================================
- * os_sem_wait_timeout
- * timeout_ms: OS_TIMEOUT_FOREVER to block indefinitely.
- * Returns 0 on success (signal consumed), -1 on timeout, -2 on Busy.
- * ============================================================= */
+/**
+ * @brief Acquires (waits on) a semaphore with a specified timeout limit.
+ *
+ * @param[in,out] sem         Pointer to the semaphore instance.
+ * @param[in]     timeout_ms  Timeout in milliseconds, or OS_TIMEOUT_FOREVER to block indefinitely.
+ *
+ * @return  0 on success (signal consumed).
+ * @return -1 on timeout (signal not received before expiration).
+ * @return -2 on busy/error condition.
+ */
 int os_sem_wait_timeout(OS_Sem *sem, uint32_t timeout_ms)
 {
     uint32_t deadline = os_now_ms() + timeout_ms;
@@ -83,9 +95,14 @@ int os_sem_wait_timeout(OS_Sem *sem, uint32_t timeout_ms)
     }
 }
 
-/* =============================================================
- * os_sem_try_wait - non-blocking
- * ============================================================= */
+/**
+ * @brief Non-blocking attempt to acquire (wait on) a semaphore.
+ *
+ * @param[in,out] sem  Pointer to the semaphore instance.
+ *
+ * @return  0 on success (signal consumed).
+ * @return -1 if semaphore is not signaled (would block).
+ */
 int os_sem_try_wait(OS_Sem *sem)
 {
     uint32_t primask = os_enter_critical();
@@ -104,17 +121,31 @@ int os_sem_try_wait(OS_Sem *sem)
     return result;
 }
 
-/* =============================================================
- * os_sem_signal - from task context
- * ============================================================= */
+/**
+ * @brief Signals (posts to) a semaphore from task context.
+ *
+ * If a task is waiting on the semaphore, it will be unblocked and a context switch/yield
+ * will be triggered so the unblocked task can run immediately.
+ *
+ * @param[in,out] sem  Pointer to the semaphore instance.
+ */
 void os_sem_signal(OS_Sem *sem)
 {
     (void)os_sem_signal_timeout(sem, OS_WAIT_FOREVER);
 }
 
-/* =============================================================
- * os_sem_signal_timeout
- * ============================================================= */
+/**
+ * @brief Signals a semaphore with a timeout if the previous signal was not consumed.
+ *
+ * If `count` is already 1, this function blocks up to `timeout_ms` waiting for the previous
+ * signal to be consumed by an acquiring task before posting the new signal.
+ *
+ * @param[in,out] sem         Pointer to the semaphore instance.
+ * @param[in]     timeout_ms  Timeout in milliseconds, or OS_TIMEOUT_FOREVER to wait indefinitely.
+ *
+ * @return  0 on success (signal successfully posted).
+ * @return -1 if timeout elapsed while waiting for previous signal to be consumed.
+ */
 int os_sem_signal_timeout(OS_Sem *sem, uint32_t timeout_ms)
 {
     uint32_t deadline = os_now_ms() + timeout_ms;
@@ -167,9 +198,15 @@ int os_sem_signal_timeout(OS_Sem *sem, uint32_t timeout_ms)
     }
 }
 
-/* =============================================================
- * os_sem_signal_from_isr - ISR-safe, non-blocking, no context switch
- * ============================================================= */
+/**
+ * @brief Signals a semaphore safely from an Interrupt Service Routine (ISR).
+ *
+ * Unblocks any waiting task without executing a context switch or blocking inside the ISR.
+ *
+ * @note Must only be called from ISR context.
+ *
+ * @param[in,out] sem  Pointer to the semaphore instance.
+ */
 void os_sem_signal_from_isr(OS_Sem *sem)
 {
     sem->count = 1;
