@@ -1,13 +1,21 @@
 #include "os_queue.h"
 
-/* Helper macro to calculate memory slot offset */
+/**
+ * @brief Helper macro to calculate memory slot offse.
+ */
 #define QUEUE_SLOT_PTR(q, idx) ((uint8_t *)(q)->buffer + ((idx) * ((q)->queue_size + 1)))
 
-/* =============================================================
- * os_queue_init
- * User provides backing memory buffer. Minimum buffer size needed:
- * queue_depth * (queue_size + 1) [1 byte extra per slot for payload len]
- * ============================================================= */
+/**
+ * @brief Initializes a message queue instance with user-allocated backing memory.
+ *
+ * @note The required backing memory buffer size must be at least:
+ *       `queue_depth * (queue_size + 1)` bytes (allocating 1 byte overhead per slot for length).
+ *
+ * @param[out] q           Pointer to the queue control block instance.
+ * @param[in]  buffer_mem  Pointer to raw allocated memory matching minimum required size.
+ * @param[in]  queue_size  Maximum payload length allowed per message in bytes.
+ * @param[in]  queue_depth Maximum number of messages the queue can hold.
+ */
 void os_queue_init(OS_Queue *q, void *buffer_mem, uint16_t queue_size, uint16_t queue_depth)
 {
     if (!q || !buffer_mem || !queue_size || !queue_depth)
@@ -25,11 +33,19 @@ void os_queue_init(OS_Queue *q, void *buffer_mem, uint16_t queue_size, uint16_t 
     q->waiting_tx_task = OS_QUEUE_NO_WAITER;
 }
 
-/* =============================================================
- * os_queue_send_timeout
- * Blocking send with timeout.
- * Returns 0 on success, -1 on timeout.
- * ============================================================= */
+/**
+ * @brief Sends a message to the queue from task context with a blocking timeout.
+ *
+ * If the queue is full, the calling task blocks until space becomes available or the timeout expires.
+ *
+ * @param[in,out] q           Pointer to the queue control block instance.
+ * @param[in]     data        Pointer to message payload buffer.
+ * @param[in]     len         Length of message payload in bytes (must be <= queue_size).
+ * @param[in]     timeout_ms  Timeout in milliseconds, or OS_TIMEOUT_FOREVER to block indefinitely.
+ *
+ * @return  0 on success (message posted to queue).
+ * @return -1 on timeout (queue remained full).
+ */
 int os_queue_send_timeout(OS_Queue *q, const void *data, uint8_t len, uint32_t timeout_ms)
 {
     uint32_t start_time = os_now_ms();
@@ -99,12 +115,18 @@ int os_queue_send_timeout(OS_Queue *q, const void *data, uint8_t len, uint32_t t
     }
 }
 
-/* =============================================================
- * os_queue_send_from_isr
- * Non-blocking, ISR-safe queue send.
- * Returns 0 on success, -1 if queue is full.
- * Set higher_prio_task_woken to non-null to notify scheduler.
- * ============================================================= */
+/**
+ * @brief Non-blocking, ISR-safe function to post a message to the queue.
+ *
+ * @note Must only be called from ISR context. Does not block or invoke scheduler directly.
+ *
+ * @param[in,out] q     Pointer to the queue control block instance.
+ * @param[in]     data  Pointer to message payload buffer.
+ * @param[in]     len   Length of message payload in bytes (must be <= queue_size).
+ *
+ * @return  0 on success (message posted to queue).
+ * @return -1 if queue is full.
+ */
 int os_queue_send_from_isr(OS_Queue *q, const void *data, uint8_t len)
 {
     uint32_t primask = os_enter_critical();
@@ -143,7 +165,18 @@ int os_queue_send_from_isr(OS_Queue *q, const void *data, uint8_t len)
     return 0;
 }
 
-/* Non-blocking wrapper for ISRs or fast sends */
+/**
+ * @brief Non-blocking wrapper to send a message to the queue from task context.
+ *
+ * Returns immediately without blocking if the queue is full.
+ *
+ * @param[in,out] q     Pointer to the queue control block instance.
+ * @param[in]     data  Pointer to message payload buffer.
+ * @param[in]     len   Length of message payload in bytes (must be <= queue_size).
+ *
+ * @return  0 on success (message posted to queue).
+ * @return -1 if queue is full.
+ */
 int os_queue_send(OS_Queue *q, const void *data, uint8_t len)
 {
     if (!q || !data)
@@ -153,11 +186,20 @@ int os_queue_send(OS_Queue *q, const void *data, uint8_t len)
     return os_queue_send_timeout(q, data, len, 0);
 }
 
-/* =============================================================
- * os_queue_receive_timeout
- * Blocking receive with timeout.
- * Returns 0 on success, -1 on timeout, -2 on Busy..
- * ============================================================= */
+/**
+ * @brief Receives a message from the queue with a blocking timeout.
+ *
+ * If the queue is empty, the calling task blocks until a message is posted or the timeout expires.
+ *
+ * @param[in,out] q           Pointer to the queue control block instance.
+ * @param[out]    data        Pointer to buffer where the received message will be copied.
+ * @param[out]    len         Pointer to variable that receives the actual payload length.
+ * @param[in]     timeout_ms  Timeout in milliseconds, or OS_TIMEOUT_FOREVER to block indefinitely.
+ *
+ * @return  0 on success (message retrieved).
+ * @return -1 on timeout (queue remained empty).
+ * @return -2 on busy/error condition.
+ */
 int os_queue_receive_timeout(OS_Queue *q, void *data, uint8_t *len, uint32_t timeout_ms)
 {
     uint32_t start_time = os_now_ms();
@@ -239,11 +281,18 @@ int os_queue_receive_timeout(OS_Queue *q, void *data, uint8_t *len, uint32_t tim
     }
 }
 
-/* =============================================================
- * os_queue_receive_from_isr
- * Non-blocking, ISR-safe queue receive.
- * Returns 0 on success, -1 if queue is empty.
- * ============================================================= */
+/**
+ * @brief Non-blocking, ISR-safe function to receive a message from the queue.
+ *
+ * @note Must only be called from ISR context.
+ *
+ * @param[in,out] q     Pointer to the queue control block instance.
+ * @param[out]    data  Pointer to buffer where the received message will be copied.
+ * @param[out]    len   Pointer to variable that receives the actual payload length.
+ *
+ * @return  0 on success (message retrieved).
+ * @return -1 if queue is empty.
+ */
 int os_queue_receive_from_isr(OS_Queue *q, void *data, uint8_t *len)
 {
     uint32_t primask = os_enter_critical();
@@ -281,9 +330,13 @@ int os_queue_receive_from_isr(OS_Queue *q, void *data, uint8_t *len)
     return 0;
 }
 
-/* =============================================================
- * os_queue_count
- * ============================================================= */
+/**
+ * @brief Returns the current number of messages stored in the queue.
+ *
+ * @param[in] q  Pointer to the queue control block instance.
+ *
+ * @return Number of queued messages.
+ */
 uint16_t os_queue_count(OS_Queue *q)
 {
     if (q)
@@ -298,117 +351,3 @@ uint16_t os_queue_count(OS_Queue *q)
         return 0;
     }
 }
-
-#if 0
-/* =============================================================
- * os_queue_init
- * ============================================================= */
-void os_queue_init(OS_Queue *q, uint32_t queue_size, uint32_t queue_depth)
-{
-    q->head         = 0;
-    q->tail         = 0;
-    q->count        = 0;
-    q->waiting_task = OS_QUEUE_NO_WAITER;
-    q->queue_size   = queue_size;
-    q->queue_depth  = queue_depth;
-}
-
-/* =============================================================
- * os_queue_send  -  non-blocking, ISR-safe
- * ============================================================= */
-int os_queue_send(OS_Queue *q, const void *data, uint8_t len)
-{
-    uint32_t primask = os_enter_critical();
-
-    if (q->count >= q->queue_depth)
-    {
-        os_exit_critical(primask);
-        return -1;
-    }
-
-    uint8_t l         = (len > q->queue_size) ? q->queue_size : len;
-    OS_QueueMsg *slot = &q->buf[q->tail];
-    memcpy(slot->data, data, l);
-    slot->len = l;
-
-    q->tail = (uint8_t)((q->tail + 1) % q->queue_depth);
-    q->count++;
-
-    /* Wake blocked receiver if present */
-    if (q->waiting_task != OS_QUEUE_NO_WAITER)
-    {
-        os_unblock_task(q->waiting_task);
-        q->waiting_task = OS_QUEUE_NO_WAITER;
-    }
-
-    os_exit_critical(primask);
-    return 0;
-}
-
-/* =============================================================
- * os_queue_receive_timeout
- * Returns 0 on success, -1 on timeout.
- * ============================================================= */
-int os_queue_receive_timeout(OS_Queue *q,
-                             void *data,
-                             uint8_t *len,
-                             uint32_t timeout_ms)
-{
-    uint32_t deadline = os_now_ms() + timeout_ms;
-
-    while (1)
-    {
-        uint32_t primask = os_enter_critical();
-
-        if (q->count > 0)
-        {
-            OS_QueueMsg *slot = &q->buf[q->head];
-            if (len)
-            {
-                *len = slot->len;
-            }
-            if (data)
-            {
-                memcpy(data, slot->data, slot->len);
-            }
-            q->head = (uint8_t)((q->head + 1) % q->queue_depth);
-            q->count--;
-            /* No need to clear waiting_task - we got data, not timeout */
-            os_exit_critical(primask);
-            return 0;
-        }
-
-        if (os_now_ms() >= deadline)
-        {
-            /*Clear stale waiter ID before giving up */
-            q->waiting_task = OS_QUEUE_NO_WAITER;
-            os_exit_critical(primask);
-            return -1;
-        }
-
-        /* Register as waiter BEFORE marking state sleeping */
-        q->waiting_task = os_current_id();
-
-        /* Use SLEEPING (not BLOCKED) so os_tick() also wakes us at
-         * the deadline without needing a separate timer primitive.
-         * os_queue_send wakes us early if data arrives first.       */
-        os_block_current_until(deadline); /* state ? SLEEPING  [Fix 8] */
-
-        os_exit_critical(primask);
-        os_yield();
-        /* Woken either by send (early) or by os_tick (deadline).
-         * Loop to determine which case and act accordingly.          */
-    }
-}
-
-/* =============================================================
- * os_queue_count
- * ============================================================= */
-uint8_t os_queue_count(OS_Queue *q)
-{
-    uint32_t primask = os_enter_critical();
-    uint8_t c        = q->count;
-    os_exit_critical(primask);
-    return c;
-}
-#endif
