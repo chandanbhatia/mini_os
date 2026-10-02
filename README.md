@@ -67,9 +67,9 @@ os/
 ├── os_queue.h       — Queue API
 ├── os_queue.c       — Queue implementation
 ├── os_sem.h         — Semaphore API
-└── os_sem.c         — Semaphore implementation
-└── os_timer.h       — Software Timer API
-└── os_timer.c       — Software Timer implementation
+├── os_sem.c         — Semaphore implementation
+├── os_timer.h       — Software Timer API
+├── os_timer.c       — Software Timer implementation
 
 demo/
 └── demo_app.c       — Four-task demo (LED blink, queue, semaphore)
