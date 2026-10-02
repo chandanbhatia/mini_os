@@ -42,6 +42,12 @@ typedef struct os_timer
 } os_timer_t;
 
 /**
+ * @brief Initializes timer subsystem, message queue, and spawns the Timer Daemon Task.
+ * @param priority Task priority to assign to the Timer Daemon.
+ */
+void os_timer_subsystem_init(uint8_t priority);
+
+/**
  * @brief Initializes a software timer control block.
  *
  * @param[out] timer  Pointer to the timer structure to initialize.
