@@ -1,5 +1,18 @@
 #include "os_timer.h"
 
+#include "os_queue.h"
+
+/**
+ * @brief Dedicated stack allocated for the Timer Daemon Task in 32-bit words (256 words = 1024 bytes).
+ */
+#define OS_TIMER_TASK_STACK_SIZE 256U
+
+/**
+ * @brief Maximum depth of the internal timer message queue, setting the limit for
+ *        simultaneously pending timer callback events deferred from SysTick ISR context.
+ */
+#define OS_TIMER_QUEUE_DEPTH 16U
+
 /**
  * @brief Head and tail container for the active timer linked list.
  */
@@ -9,7 +22,36 @@ typedef struct
     os_timer_t *tail;
 } os_timer_list_t;
 
+/**
+ * @brief Message queue payload structure representing an expired timer event.
+ *        Pushed from SysTick ISR context and consumed by the Timer Daemon Task.
+ */
+typedef struct
+{
+    os_timer_cb_t cb;
+    void *arg;
+} os_timer_event_t;
+
+/**
+ * @brief Linked list container tracking all currently active/running timers.
+ */
 static os_timer_list_t g_active_timer_list = {NULL, NULL};
+
+/**
+ * @brief Queue Control Block (QCB) managing deferred timer callback events.
+ */
+static OS_Queue g_timer_queue;
+
+/**
+ * @brief Dedicated static stack memory for the high-priority Timer Daemon Task.
+ */
+static uint32_t g_timer_task_stack[OS_TIMER_TASK_STACK_SIZE];
+
+/**
+ * @brief Static backing memory array reserved for g_timer_queue slots.
+ *        Uses OS_QUEUE_BUFFER_SIZE to ensure sufficient capacity for payload plus metadata.
+ */
+static uint8_t g_timer_queue_buf[OS_QUEUE_BUFFER_SIZE(sizeof(os_timer_event_t), OS_TIMER_QUEUE_DEPTH)];
 
 /**
  * @brief Initializes a software timer control block.
@@ -152,6 +194,7 @@ bool os_timer_is_running(const os_timer_t *timer)
     {
         return false;
     }
+
     return (timer->state == OS_TIMER_RUNNING);
 }
 
@@ -176,10 +219,16 @@ void os_timer_tick(void)
 
         if (curr->remaining_ticks == 0U)
         {
-            /* Execute callback */
             if (curr->cb != NULL)
             {
-                curr->cb(curr->arg);
+                /* Defer callback execution to the Timer Daemon Task via queue.
+                 * Offloading from SysTick ISR context keeps ISR latency minimal and
+                 * allows callbacks to safely invoke blocking RTOS APIs. */
+                os_timer_event_t evt = {
+                    .cb  = curr->cb,
+                    .arg = curr->arg
+                };
+                (void)os_queue_send_from_isr(&g_timer_queue, &evt, sizeof(evt));
             }
 
             if (curr->type == OS_TIMER_PERIODIC)
@@ -223,4 +272,48 @@ void os_timer_tick(void)
     }
 
     os_exit_critical(primask);
+}
+
+/**
+ * @brief Private Daemon Task routine executing deferred callbacks.
+ */
+static void os_timer_task(void)
+{
+    os_timer_event_t evt;
+    uint8_t len = 0U;
+
+    for (;;)
+    {
+        if (os_queue_receive_timeout(&g_timer_queue, &evt, &len, OS_WAIT_FOREVER) == 0)
+        {
+            if (evt.cb != NULL)
+            {
+                /* Executed in Task Context with interrupts fully enabled */
+                evt.cb(evt.arg);
+            }
+        }
+    }
+}
+
+/**
+ * @brief Initializes timer subsystem, message queue, and spawns the Timer Daemon Task.
+ * @param priority Task priority to assign to the Timer Daemon.
+ */
+void os_timer_subsystem_init(uint8_t priority)
+{
+    int ret = os_queue_init(&g_timer_queue,
+                            g_timer_queue_buf,
+                            sizeof(g_timer_queue_buf),
+                            sizeof(os_timer_event_t),
+                            OS_TIMER_QUEUE_DEPTH);
+
+    dev_assert(ret == 0);
+
+    int task_id = os_task_create(os_timer_task,
+                                 "timer_daemon",
+                                 g_timer_task_stack,
+                                 OS_TIMER_TASK_STACK_SIZE,
+                                 priority);
+
+    dev_assert(task_id > 0);
 }

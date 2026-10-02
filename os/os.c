@@ -1,41 +1,79 @@
 #include "os.h"
+#include "os_timer.h"
 
-#define OS_IDLE_STACK_SZ 128 /* words */
+/**
+ * @brief Stack depth allocated for the system Idle Task in 32-bit words (128 words = 512 bytes).
+ */
+#define OS_IDLE_STACK_SZ 128U
 
+/**
+ * @brief Total number of priority levels in the system (Priority 0 to OS_PRIORITY_MAX).
+ */
 #define TASK_READY_ARRAY_SIZE (OS_PRIORITY_MAX + 1U)
 
+/**
+ * @brief Head and tail container for the ready to run task.
+ */
 typedef struct
 {
     OS_TCB *head;
     OS_TCB *tail;
 } os_ready_list_t;
 
+/**
+ * @brief Static allocation pool for Task Control Blocks (TCBs), enforcing zero-heap design.
+ */
 static OS_TCB os_tasks[OS_MAX_TASKS];
 
+/**
+ * @brief Array of ready lists indexed directly by priority level.
+ */
 static os_ready_list_t g_ready_lists[TASK_READY_ARRAY_SIZE] = {NULL};
 
-static OSTickCb os_tick_cb = NULL;
+/**
+ * @brief Pointer to the Task Control Block (TCB) currently executing on the CPU.
+ */
+static OS_TCB *g_current_tcb = NULL;
 
-static OS_TCB *g_current_tcb   = NULL;
-static uint32_t g_ready_bitmap = 0;
-
-static uint32_t g_os_ms     = 0;
-static uint8_t g_os_n_tasks = 0;
-static uint8_t g_os_cur     = 0;
-
-/* Bootstrap flag: on first PendSV call we must NOT save
- * the startup context into any real TCB.                */
-static volatile uint8_t bootstrapping = 0;
-
-static volatile bool if_os_started = false;
-
+/**
+ * @brief Idle task stack owned here; no user allocation needed.
+ */
 /* Idle task stack owned here; no user allocation needed */
 static uint32_t os_idle_stack[OS_IDLE_STACK_SZ] __attribute__((aligned(8)));
+/**
+ * @brief Priority bitmask where bit N set indicates an active task at priority N.
+ *        Enables $O(1)$ highest-priority lookup via hardware Count Leading Zeros (__CLZ).
+ */
+static uint32_t g_ready_bitmap = 0U;
+
+/**
+ * @brief Monotonic system tick counter tracking total elapsed time in milliseconds.
+ */
+static uint32_t g_os_ms = 0U;
+
+/**
+ * @brief Total count of tasks currently created and registered in the system.
+ */
+static uint8_t g_os_n_tasks = 0U;
+
+/**
+ * @brief ID/Index of the currently executing task in `os_tasks`.
+ */
+static uint8_t g_os_cur = 0U;
+
+/**
+ * @brief On first PendSV call we must NOT save the startup context into any real TCB.
+ */
+static volatile uint8_t g_bootstrapping = 0;
+
+/**
+ * @brief Flag to check if OS stared from the App.
+ */
+static volatile bool if_os_started = false;
 
 static void os_idle_func(void);
 static void os_remove_task_ready(OS_TCB *tcb);
 
-void os_block_current_until(uint32_t until_ms);
 uint32_t os_pendsv_schedule(uint32_t cur_sp);
 
 /**
@@ -212,10 +250,10 @@ static void os_remove_task_ready(OS_TCB *tcb)
 void os_kernel_init(void)
 {
     memset((void *)os_tasks, 0, sizeof(os_tasks));
+
     g_os_n_tasks = 0;
     g_os_cur     = 0;
     g_os_ms      = 0;
-    os_tick_cb   = NULL;
 
     g_ready_bitmap = 0;
     for (uint32_t i = 0; i < TASK_READY_ARRAY_SIZE; i++)
@@ -240,6 +278,8 @@ void os_kernel_init(void)
     g_os_n_tasks     = 1;
 
     os_add_task_ready(idle);
+
+    os_timer_subsystem_init(OS_PRIORITY_MAX);
 }
 
 /**
@@ -323,9 +363,9 @@ __attribute__((naked)) void PendSV_Handler(void)
 uint32_t os_pendsv_schedule(uint32_t cur_sp)
 {
     /* Bootstrap: first invocation has no real current task to save */
-    if (bootstrapping)
+    if (g_bootstrapping)
     {
-        bootstrapping = 0;
+        g_bootstrapping = 0;
         /* g_os_cur and os_tasks[g_os_cur].state already set by os_start() */
         return os_tasks[g_os_cur].sp;
     }
@@ -417,11 +457,6 @@ void os_tick(void)
         }
     }
 
-    if (os_tick_cb)
-    {
-        os_tick_cb(g_os_ms);
-    }
-
     SCB->ICSR = SCB_ICSR_PENDSVSET_Msk;
     __DSB();
     __ISB();
@@ -442,8 +477,8 @@ void os_start(void)
     g_os_cur                 = (g_os_n_tasks > 1) ? 1U : 0U;
     os_tasks[g_os_cur].state = OS_TASK_RUNNING;
 
-    bootstrapping = 1;
-    SCB->ICSR     = SCB_ICSR_PENDSVSET_Msk;
+    g_bootstrapping = 1;
+    SCB->ICSR       = SCB_ICSR_PENDSVSET_Msk;
 
     if_os_started = true;
     __DSB();
